@@ -8,8 +8,19 @@ export const metadataExampleOne = inngest.createFunction(
   async ({ event, step }) => {
     const result = await step.run("example-step", async () => {
       await inngest.metadata.update({ key: "metadata/inside/undefined-target" });
+      await inngest.metadata.run().update({ key: "metadata/inside/undefined-target" });
+      await inngest.metadata.attempt().update({ key: "metadata/inside/undefined-target" });
+      await inngest.metadata.step().update({ key: "metadata/inside/undefined-target" });
 
-      return { success: true };
+
+      let parts: any[][] = []
+      for (let i = 0; i < 500; i++) {
+        parts.push([`key-${i}`, i]);
+      }
+
+      await inngest.metadata.update(Object.fromEntries(parts), 'large-payload-test');
+
+      return { success: true, ...Object.fromEntries(parts) };
     });
 
     return result;
@@ -51,7 +62,7 @@ export const metadataExampleFour = inngest.createFunction(
   { id: "metadata-outside-step-context-target-defined" },
   { event: "metadata/outside/defined-target" },
   async ({ event, step }) => {
-    result = { nice: 'test' }
+    const result = { nice: 'test' }
 
     await inngest.metadata.run("01KC20BH6NQHAXGEVKG5BX7N68").update({ key: `outside/defined-target/timestamp-${Date.now()}` });
 
@@ -157,7 +168,11 @@ export const durableExecutionExample = inngest.createFunction(
 export const spanInferenceExample = inngest.createFunction(
   { id: "span-inference-example" },
   { event: "span-inference-example" },
-  async ({ event, step, tracer }) => {
+  async ({ step, tracer }) => {
+    await step.run("auto-spans", async () => {
+      await fetch("http://example.com");
+    });
+
     await step.run("fake-spans", async () => {
       await tracer.startActiveSpan("ai-span", async (span) => {
         await sleep(500);
@@ -167,9 +182,9 @@ export const spanInferenceExample = inngest.createFunction(
           "gen_ai.request.model": "some-model",
           "gen_ai.system": "some-system",
           "gen_ai.operation.name": "some-operation",
-        })
-        span.end()
-      })
+        });
+        span.end();
+      });
 
       await tracer.startActiveSpan("http-span", async (span) => {
         await sleep(500);
@@ -183,7 +198,20 @@ export const spanInferenceExample = inngest.createFunction(
 
           "url.domain": "example.com",
           "url.path": "/some/path",
-        })
+        });
+        span.end();
+      });
+    });
+
+    await step.run("nested-spans", async () => {
+      await tracer.startActiveSpan("span1", async (span) => {
+        span.setAttributes({"key1": "value1"});
+        await sleep(500);
+        await tracer.startActiveSpan("span2", async (span) => {
+          span.setAttributes({"key2": "value2"});
+          await sleep(500);
+          span.end()
+        });
         span.end()
       })
     })
