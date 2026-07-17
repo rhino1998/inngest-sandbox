@@ -38,6 +38,8 @@ export const metadataExampleThree = inngest.createFunction(
       return { success: true };
     });
 
+    await step.sleep('sleep-for-a-bit', "15s");
+
     return result;
   },
 );

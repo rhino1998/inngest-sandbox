@@ -3,7 +3,7 @@ import { extendedTracesMiddleware, metadataMiddleware } from "inngest/experiment
 
 export const inngest = new Inngest({
   id: "sandbox-ts-connect",
-  baseUrl: "https://api.inngest.net",
+  baseUrl: "http://localhost:8190",
   isDev: false,
   middleware: [metadataMiddleware(), extendedTracesMiddleware()],
 });
