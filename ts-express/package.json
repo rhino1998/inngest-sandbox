@@ -2,14 +2,15 @@
   "name": "sandbox-ts-express",
   "version": "0.0.0",
   "scripts": {
-    "dev": "tsx -r dotenv/config --watch src/index.ts",
-    "prod": "export INNGEST_DEV=0 && tsx -r dotenv/config --watch src/index.ts"
+    "dev": "tsx -r dotenv/config --watch src/otel-bootstrap.ts",
+    "prod": "export INNGEST_DEV=0 && tsx -r dotenv/config --watch src/otel-bootstrap.ts"
   },
   "dependencies": {
-    "@inngest/middleware-encryption": "1.0.2",
+    "@inngest/middleware-encryption": "2.0.0",
+    "@inngest/otel": "0.2.2",
     "dotenv": "17.2.3",
     "express": "5.1.0",
-    "inngest": "file:../../inngest-js/packages/inngest/inngest.tgz"
+    "inngest": "4.26.2"
   },
   "devDependencies": {
     "@types/express": "5.0.5",

@@ -1,7 +1,94 @@
 import { inngest } from "./client";
 import { experiment, NonRetriableError } from "inngest";
+import { createDefer } from "inngest/experimental";
 
 const sleep = (duration = 1) => { return new Promise(resolve => setTimeout(resolve, duration))}
+
+export const fiveSteps = inngest.createFunction(
+  {
+    id: "five-steps",
+    name: "Five Steps",
+    triggers: { event: "five-steps" },
+  },
+  async ({ step }) => {
+    const one = await step.run("step-1", async () => {
+      await sleep(500);
+      return { value: 1 };
+    });
+
+    const two = await step.run("step-2", async () => {
+      await sleep(500);
+      return { value: one.value + 1 };
+    });
+
+    const three = await step.run("step-3", async () => {
+      await sleep(500);
+      return { value: two.value + 1 };
+    });
+
+    const four = await step.run("step-4", async () => {
+      await sleep(500);
+      return { value: three.value + 1 };
+    });
+
+    const five = await step.run("step-5", async () => {
+      await sleep(500);
+      return { value: four.value + 1 };
+    });
+
+    return { success: true, result: five.value };
+  },
+);
+
+export const waitForEventTrigger = inngest.createFunction(
+  {
+    id: "wait-for-event-trigger",
+    name: "Wait For Event - Trigger",
+    triggers: { event: "wait-for-event-trigger" },
+  },
+  async ({ step }) => {
+    await step.sendEvent("send-wait-for-event-test", {
+      name: "wait-for-event-test",
+      data: {},
+    });
+  },
+);
+
+export const waitForEventWaiter = inngest.createFunction(
+  {
+    id: "wait-for-event-waiter",
+    name: "Wait For Event - Waiter",
+    triggers: { event: "wait-for-event-test" },
+  },
+  async ({ step }) => {
+    console.log("Waiting for signal event");
+
+    const signal = await step.waitForEvent("wait-for-signal", {
+      event: "wait-for-event-test-signal",
+      timeout: "30s",
+    });
+
+    return { success: true, received: signal !== null };
+  },
+);
+
+export const waitForEventSender = inngest.createFunction(
+  {
+    id: "wait-for-event-sender",
+    name: "Wait For Event - Sender",
+    triggers: { event: "wait-for-event-test" },
+  },
+  async ({ step }) => {
+    await step.run("delay-before-signal", async () => {
+      await sleep(1000);
+    });
+
+    await step.sendEvent("send-signal", {
+      name: "wait-for-event-test-signal",
+      data: { hello: "world" },
+    });
+  },
+);
 
 export const waitForEvent = inngest.createFunction(
   {
@@ -132,6 +219,58 @@ export const scoreTest = inngest.createFunction(
 )
 
 
+// Deferred (fire-and-forget) companion function that scores the parent run.
+// Triggered via `defer(id, { function, data })` from `deferScoreTest` below.
+export const deferredScoreWorker = createDefer(
+  inngest,
+  {
+    id: "defer-score-worker",
+    name: "Defer Score Worker",
+  },
+  async ({ step }) => {
+    await step.run("score-deferred-run", async () => {
+      await inngest.score({ name: "guardrail-pass", value: Math.random() > 0.4 ? 1 : 0 });
+      await inngest.score({ name: "deferred-quality", value: Math.random() });
+    });
+  },
+);
+
+export const deferScoreTest = inngest.createFunction(
+  {
+    id: "defer-score-test",
+    name: "Defer Score Test",
+    triggers: { event: "defer-score-test" },
+  },
+  async ({ step, defer, group }) => {
+    console.log("This runs immediately when the function is invoked");
+
+    const { variant, experimentRef } = await group.experiment("defer-score-test-experiment", {
+      variants: {
+        variantA: async () => {
+          await step.run("variantA-step", async () => {})
+        },
+        variantB: async () => {
+          await step.run("variantB-step", async () => {})
+        },
+      },
+      select: experiment.weighted({ variantA: 1, variantB: 1 }),
+    });
+
+    await step.run("do-work", async () => {
+      await sleep(200);
+    });
+
+    // Fire-and-forget: scores the run without blocking on the deferred function.
+    defer("score-deferred-run", {
+      function: deferredScoreWorker,
+      data: {},
+      experiment: experimentRef,
+    });
+
+    return { success: true, variant };
+  },
+);
+
 export const sessionTest = inngest.createFunction(
   {
     id: "session-test",
@@ -141,12 +280,13 @@ export const sessionTest = inngest.createFunction(
   async ({ step }) => {
 
     const conversationId = Math.random().toString(36).substring(2, 15);
+    const userId = `user_${Math.random().toString(36).substring(2, 10)}`;
     console.log("This runs immediately when the function is invoked");
     await step.sendEvent("send-event", {
       name: 'demo/session-test',
       data: { conversationId, depth: 1 },
       meta: {
-        sessions: { conversation_id: conversationId },
+        sessions: { conversation_id: conversationId, user_id: userId },
       },
     });
   }
@@ -163,11 +303,19 @@ export const sessionTest2 = inngest.createFunction(
       limit: 1
     },
   },
-  async ({ event }) => {
+  async ({ event, defer }) => {
     console.log("This runs immediately when the function is invoked");
     if (event.data.depth >= 5) {
       throw new NonRetriableError("Depth limit reached");
     }
+
+    // Fire-and-forget: scores this turn. Sessions are inherited automatically
+    // from ctx.sessions, so the deferred run stays grouped with this conversation.
+    defer("score-turn", {
+      function: deferredScoreWorker,
+      data: {},
+    });
+
     await inngest.send({
       name: 'demo/session-test',
       data: { depth: event.data.depth+1, conversationId: event.data.conversationId },
@@ -175,6 +323,23 @@ export const sessionTest2 = inngest.createFunction(
     });
   }
 )
+
+// export const cronRateLimitTest = inngest.createFunction(
+//   {
+//     id: "cron-rate-limit-test",
+//     name: "Cron Rate Limit Test",
+//     triggers: { cron: "* * * * *" },
+//     rateLimit: {
+//       limit: 1,
+//       period: "2m",
+//       key: 'event.id',
+//     },
+//   },
+//   async () => {
+//     console.log("This runs on a 1-minute cron, rate limited to once per 2 minutes");
+//     return { success: true, ranAt: new Date().toISOString() };
+//   }
+// )
 
 // Emits fake gen_ai.* OTel spans so the backend's AI metadata extractor
 // (extractAIMetadataFromAttributes) picks them up — no real model call, just
@@ -187,10 +352,70 @@ export const sessionTest2 = inngest.createFunction(
 const FAKE_AI_MODELS = [
   { model: "gpt-4o", provider: "openai" },
   { model: "gpt-4o-mini", provider: "openai" },
-  { model: "claude-3-5-sonnet-20241022", provider: "anthropic" },
+  { model: "claude-haiku-4-5-20251001", provider: "anthropic" },
   { model: "gemini-2.5-pro", provider: "google" },
   { model: "some-unlisted-finetune-v3", provider: "openai" }, // unpriced on purpose
+  { model: "llama-3.3-70b", provider: "meta" },
 ];
+
+// Runs the single-model experiment shared by all ai-metadata-test functions:
+// picks one fake model via group.experiment and emits its gen_ai.* span.
+const runFakeAICall = async (
+  experimentName: string,
+  {
+    step,
+    tracer,
+    group,
+    score = false,
+  }: { step: any; tracer: any; group: any; score?: boolean },
+) => {
+  const variants = Object.fromEntries(
+    FAKE_AI_MODELS.map(({ model, provider }) => [
+      model,
+      async () => {
+        await step.run(`fake-ai-call-${model}`, async () => {
+          const inputTokens = 200 + Math.floor(Math.random() * 800);
+          const outputTokens = 50 + Math.floor(Math.random() * 400);
+          const latencyMs = 300 + Math.floor(Math.random() * 2200);
+
+          await tracer.startActiveSpan(`chat ${model}`, async (span: any) => {
+            span.setAttribute("gen_ai.operation.name", "chat");
+            span.setAttribute("gen_ai.provider.name", provider);
+            span.setAttribute("gen_ai.request.model", model);
+            span.setAttribute("gen_ai.response.model", model);
+            span.setAttribute("gen_ai.usage.input_tokens", inputTokens);
+            span.setAttribute("gen_ai.usage.output_tokens", outputTokens);
+            span.setAttribute(
+              "gen_ai.usage.total_tokens",
+              inputTokens + outputTokens,
+            );
+            span.setAttribute("gen_ai.response.finish_reasons", ["stop"]);
+
+            await sleep(latencyMs);
+            span.end();
+          });
+
+          if (score) {
+            await inngest.score({ name: "guardrail-pass", value: Math.random() > 0.4 ? 1 : 0 });
+            await inngest.score({ name: "bool-2", value: Math.random() > 0.5 ? 1 : 0 });
+            await inngest.score({ name: "response-quality", value: Math.random() });
+          }
+        });
+
+        if (score) {
+          await step.score("latency-score", { name: "latency-score", value: Math.random() });
+        }
+      },
+    ]),
+  );
+
+  return group.experiment(experimentName, {
+    variants,
+    select: experiment.weighted(
+      Object.fromEntries(FAKE_AI_MODELS.map(({ model }) => [model, 1])),
+    ),
+  });
+};
 
 export const aiMetadataTest = inngest.createFunction(
   {
@@ -198,37 +423,284 @@ export const aiMetadataTest = inngest.createFunction(
     name: "AI Metadata Test",
     triggers: { event: "ai-metadata-test" },
   },
-  async ({ step, tracer, event }) => {
-    const callCount = event.data?.callCount ?? 8;
+  async ({ step, tracer, group }) => {
+    const { variant } = await runFakeAICall("ai-metadata-model", {
+      step,
+      tracer,
+      group,
+      score: true,
+    });
 
-    for (let i = 0; i < callCount; i++) {
-      const { model, provider } = FAKE_AI_MODELS[i % FAKE_AI_MODELS.length];
+    return { success: true, model: variant };
+  },
+);
 
-      await step.run(`fake-ai-call-${i}`, async () => {
-        const inputTokens = 200 + Math.floor(Math.random() * 800);
-        const outputTokens = 50 + Math.floor(Math.random() * 400);
-        const latencyMs = 300 + Math.floor(Math.random() * 2200);
+export const aiMetadataRagTest = inngest.createFunction(
+  {
+    id: "ai-metadata-rag-test",
+    name: "AI Metadata RAG Test",
+    triggers: { event: "ai-metadata-rag-test" },
+  },
+  async ({ step, tracer, group }) => {
+    const { documents } = await step.run("retrieve-documents", async () => {
+      await sleep(80 + Math.floor(Math.random() * 220));
+      return { documents: 2 + Math.floor(Math.random() * 4) };
+    });
 
-        await tracer.startActiveSpan(`chat ${model}`, async (span) => {
-          span.setAttribute("gen_ai.operation.name", "chat");
-          span.setAttribute("gen_ai.provider.name", provider);
-          span.setAttribute("gen_ai.request.model", model);
-          span.setAttribute("gen_ai.response.model", model);
-          span.setAttribute("gen_ai.usage.input_tokens", inputTokens);
-          span.setAttribute("gen_ai.usage.output_tokens", outputTokens);
-          span.setAttribute(
-            "gen_ai.usage.total_tokens",
-            inputTokens + outputTokens,
-          );
-          span.setAttribute("gen_ai.response.finish_reasons", ["stop"]);
+    const { variant } = await runFakeAICall("ai-metadata-rag-model", {
+      step,
+      tracer,
+      group,
+    });
 
-          await sleep(latencyMs);
-          span.end();
-        });
+    await step.run("rerank-and-cache-response", async () => {
+      await sleep(20 + Math.floor(Math.random() * 60));
+    });
+
+    return { success: true, model: variant, documents };
+  },
+);
+
+export const aiMetadataModerationTest = inngest.createFunction(
+  {
+    id: "ai-metadata-moderation-test",
+    name: "AI Metadata Moderation Test",
+    triggers: { event: "ai-metadata-moderation-test" },
+  },
+  async ({ step, tracer, group }) => {
+    await step.run("moderate-input", async () => {
+      await sleep(50 + Math.floor(Math.random() * 100));
+      return { flagged: false };
+    });
+
+    const { variant } = await runFakeAICall("ai-metadata-moderation-model", {
+      step,
+      tracer,
+      group,
+    });
+
+    await step.run("score-response", async () => {
+      await inngest.score({ name: "response-quality", value: Math.random() });
+    });
+
+    return { success: true, model: variant };
+  },
+);
+
+export const aiMetadataToolCallTest = inngest.createFunction(
+  {
+    id: "ai-metadata-tool-call-test",
+    name: "AI Metadata Tool Call Test",
+    triggers: { event: "ai-metadata-tool-call-test" },
+  },
+  async ({ step, tracer, group }) => {
+    await step.run("parse-user-request", async () => {
+      await sleep(30 + Math.floor(Math.random() * 70));
+      return { intent: "lookup-order-status" };
+    });
+
+    const { variant } = await runFakeAICall("ai-metadata-tool-call-model", {
+      step,
+      tracer,
+      group,
+    });
+
+    const { toolResult } = await step.run("execute-tool-call", async () => {
+      await sleep(100 + Math.floor(Math.random() * 300));
+      return { toolResult: { status: "shipped" } };
+    });
+
+    await step.run("format-final-answer", async () => {
+      await sleep(20 + Math.floor(Math.random() * 40));
+    });
+
+    return { success: true, model: variant, toolResult };
+  },
+);
+
+export const aiMetadataSummarizationTest = inngest.createFunction(
+  {
+    id: "ai-metadata-summarization-test",
+    name: "AI Metadata Summarization Test",
+    triggers: { event: "ai-metadata-summarization-test" },
+  },
+  async ({ step, tracer, group }) => {
+    const { chunks } = await step.run("chunk-document", async () => {
+      await sleep(60 + Math.floor(Math.random() * 140));
+      return { chunks: 4 + Math.floor(Math.random() * 6) };
+    });
+
+    const { variant } = await runFakeAICall("ai-metadata-summarization-model", {
+      step,
+      tracer,
+      group,
+    });
+
+    await step.run("update-metadata", async () => {
+      await inngest.metadata.update({ key: "summary-model", model: variant });
+    });
+
+    await step.run("persist-summary", async () => {
+      await sleep(30 + Math.floor(Math.random() * 90));
+    });
+
+    return { success: true, model: variant, chunks };
+  },
+);
+
+// Simulates a multi-turn chat session: each turn is throttled per
+// conversation (like sessionTest/sessionTest2) and makes a fake AI model call
+// via runFakeAICall so every turn emits gen_ai.* spans tied to the same
+// session, letting the dashboard join sessions with AI metadata end-to-end.
+export const aiSessionTest = inngest.createFunction(
+  {
+    id: "ai-session-test",
+    name: "AI Session Test",
+    triggers: { event: "ai-session-test" },
+  },
+  async ({ step, tracer, group }) => {
+    const conversationId = Math.random().toString(36).substring(2, 15);
+    const userId = `user_${Math.random().toString(36).substring(2, 10)}`;
+    const maxDepth = Math.floor(Math.random() * 5) + 1; // Random max depth between 1 and 5
+
+    await runFakeAICall("ai-session-kickoff-model", {
+      step,
+      tracer,
+      group,
+    });
+
+    await step.sendEvent("send-event", {
+      name: "demo/ai-session-turn",
+      data: { conversationId, depth: 1, maxDepth: maxDepth },
+      meta: {
+        sessions: { conversation_id: conversationId, user_id: userId },
+      },
+    });
+  },
+);
+
+export const aiSessionTurn = inngest.createFunction(
+  {
+    id: "ai-session-turn",
+    name: "AI Session Turn",
+    triggers: { event: "demo/ai-session-turn" },
+  },
+  async ({ step, tracer, group, event }) => {
+    const { variant } = await runFakeAICall("ai-session-model", {
+      step,
+      tracer,
+      group,
+    });
+
+    await step.run("update-session-metadata", async () => {
+      await inngest.metadata.update({
+        key: "ai-session-turn",
+        model: variant,
+        turn: event.data.depth,
       });
+    });
+
+    if (event.data.depth >= event.data.maxDepth) {
+      await step.sendEvent("send-session-complete-event", {
+        name: "demo/ai-session-complete",
+        data: {
+          conversationId: event.data.conversationId,
+          totalTurns: event.data.depth,
+        },
+        meta: event.meta,
+      });
+
+      return
     }
 
-    return { success: true, calls: callCount };
+    await inngest.send({
+      name: "demo/ai-session-turn",
+      data: { depth: event.data.depth + 1, conversationId: event.data.conversationId, maxDepth: event.data.maxDepth ?? 5 },
+      meta: event.meta,
+    });
+  },
+);
+
+export const aiSessionFinalize = inngest.createFunction(
+  {
+    id: "ai-session-finalize",
+    name: "AI Session Finalize",
+    triggers: { event: "demo/ai-session-complete" },
+  },
+  async ({ step, tracer, group, event }) => {
+    const { variant } = await runFakeAICall("ai-session-finalize-model", {
+      step,
+      tracer,
+      group,
+    });
+
+    await step.run("finalize-session", async () => {
+      await sleep(30 + Math.floor(Math.random() * 90));
+      await inngest.metadata.update({
+        key: "ai-session-turn",
+        finalized: true,
+        totalTurns: event.data.totalTurns,
+        summaryModel: variant,
+      });
+    });
+  },
+);
+
+// Sends a batch of events in one `inngest.send` call so they land in the same
+// batch (two separate sends can straddle batches and split across runs).
+export const batchedEventTestTrigger = inngest.createFunction(
+  {
+    id: "batched-event-test-trigger",
+    name: "Batched Event Test - Trigger",
+    triggers: { event: "batched-event-test-trigger" },
+  },
+  async ({ step }) => {
+    await step.run("send-batch", async () => {
+      await inngest.send(
+        Array.from({ length: 5 }, (_, i) => ({
+          name: "batched-event-test",
+          data: { value: i + 1 },
+        })),
+      );
+    });
+  },
+);
+
+export const batchedEventTest = inngest.createFunction(
+  {
+    id: "batched-event-test",
+    name: "Batched Event Test",
+    triggers: { event: "batched-event-test" },
+    batchEvents: { maxSize: 10, timeout: "5s" },
+  },
+  async ({ step, events }) => {
+    console.log(`This run was invoked with ${events.length} batched event(s)`);
+
+    const total = await step.run("sum-batch", async () => {
+      return events.reduce((sum, e) => sum + (e.data.value ?? 0), 0);
+    });
+
+    return { success: true, batchSize: events.length, total };
+  },
+);
+
+export const flakyTest = inngest.createFunction(
+  {
+    id: "flaky-test",
+    name: "Flaky Test",
+    triggers: { event: "flaky-test" },
+    retries: 3,
+  },
+  async ({ step }) => {
+    console.log("This runs immediately when the function is invoked");
+
+    await step.run("maybe-fail", async () => {
+      if (Math.random() < 0.5) {
+        throw new Error("Simulated random failure");
+      }
+    });
+
+    return { success: true };
   },
 );
 
